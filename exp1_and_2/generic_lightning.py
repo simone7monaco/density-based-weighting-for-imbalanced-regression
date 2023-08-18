@@ -47,7 +47,7 @@ class GenericModel(pl.LightningModule):
         """
         # init superclass
         super(GenericModel, self).__init__()
-        self.hparams = hparams
+        self.save_hyperparameters(hparams)
 
         # if you specify an example input, the summary will show input/output for each layer
         # self.example_input_array = torch.rand(5, 28 * 28)
@@ -71,6 +71,11 @@ class GenericModel(pl.LightningModule):
             batch_normalization=self.hparams.batch_normalization,
             units_per_layer=units_per_layer,
         )
+
+        # FIX: validation/test epochs end
+        # refer to this https://github.com/Lightning-AI/lightning/pull/16520
+        self.validation_step_outputs = []
+        self.test_step_outputs = []
 
     # ---------------------
     # MODEL SETUP
@@ -167,7 +172,8 @@ class GenericModel(pl.LightningModule):
             rmse = rmse.cuda(loss.device)
 
         # in DP mode (default) make sure if result is scalar, there's another dim in the beginning
-        if self.trainer.use_dp or self.trainer.use_ddp2:
+        if self.trainer.strategy.__class__.__name__ == 'DDPStrategy':
+        # if self.trainer.use_dp or self.trainer.use_ddp2:
             loss = loss.unsqueeze(0)
             rmse = rmse.unsqueeze(0)
 
@@ -179,6 +185,11 @@ class GenericModel(pl.LightningModule):
                 f'{mode}_var': total_variance,
             }
         )
+
+        if mode == 'val':
+            self.validation_step_outputs.append(output)
+        elif mode == 'test':
+            self.test_step_outputs.append(output)
 
         return output
 
@@ -194,12 +205,14 @@ class GenericModel(pl.LightningModule):
             variance = output[f'{mode}_var']
 
             # reduce manually when using dp
-            if self.trainer.use_dp:
+            if self.trainer.strategy.__class__.__name__ == 'DDPStrategy':
+            # if self.trainer.use_dp:
                 loss = torch.mean(loss)
             loss_mean += loss
 
             # reduce manually when using dp
-            if self.trainer.use_dp or self.trainer.use_ddp2:
+            # if self.trainer.use_dp or self.trainer.use_ddp2:
+            if self.trainer.strategy.__class__.__name__ == 'DDPStrategy':
                 rmse = torch.mean(rmse)
             rmse_mean += rmse
 
@@ -209,8 +222,8 @@ class GenericModel(pl.LightningModule):
         loss_mean /= len(outputs)
         rmse_mean /= len(outputs)
         r2 = 1 - sse_sum / (variance_sum + 1e-8)
-        self.log(f'{mode}_loss', loss_mean, prog_bar=True, logger=True)
-        self.log(f'{mode}_rmse', rmse_mean, prog_bar=True, logger=True)
+        self.log(f'{mode}_loss', loss_mean, prog_bar=True, logger=True, sync_dist=True)
+        self.log(f'{mode}_rmse', rmse_mean, prog_bar=True, logger=True, sync_dist=True)
         self.log(f'{mode}_r2', r2, prog_bar=True, logger=True)
 
     def training_step(
@@ -231,15 +244,16 @@ class GenericModel(pl.LightningModule):
         rmse = torch.sqrt(
             F.mse_loss(y_hat, y)
         )  # y and y_hat are switched in pytorch's mse_loss
-        r2 = r2_score(y, y_hat.detach())
+        r2 = r2_score(y.detach().cpu().numpy(), y_hat.detach().cpu().numpy())
 
         # in DP mode (default) make sure if result is scalar, there's another dim in the beginning
-        if self.trainer.use_dp or self.trainer.use_ddp2:
+        # if self.trainer.use_dp or self.trainer.use_ddp2:
+        if self.trainer.strategy.__class__.__name__ == 'DDPStrategy':
             loss_val = loss_val.unsqueeze(0)
             rmse = rmse.unsqueeze(0)
 
-        self.log('train_rmse', rmse, prog_bar=True, logger=True)
-        self.log('train_r2', r2, prog_bar=True, logger=True)
+        self.log('train_rmse', rmse, prog_bar=True, logger=True, sync_dist=True)
+        self.log('train_r2', r2, prog_bar=True, logger=True, sync_dist=True)
         output = OrderedDict(
             {
                 'loss': loss_val,
@@ -259,26 +273,28 @@ class GenericModel(pl.LightningModule):
         """
         return self.__common_step(batch, batch_idx, 'val')
 
-    def validation_epoch_end(self, outputs: dict) -> dict:
+    def on_validation_epoch_end(self):
         """
         Called at the end of validation to aggregate outputs
         :param outputs: list of individual outputs of each validation step
         :return:
         """
-        return self.__common_end(outputs, 'val')
+        self.__common_end(self.validation_step_outputs, 'val')
+        self.validation_step_outputs.clear() # free memory
 
     def test_step(
         self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: torch.Tensor
     ) -> dict:
         return self.__common_step(batch, batch_idx, 'test')
 
-    def test_epoch_end(self, outputs: dict) -> dict:
+    def on_test_epoch_end(self):
         """
         Called at the end of validation to aggregate outputs
         :param outputs: list of individual outputs of each validation step
         :return:
         """
-        return self.__common_end(outputs, 'test')
+        self.__common_end(self.test_step_outputs, 'test')
+        self.test_step_outputs.clear() # free memory
 
     # ---------------------
     # TRAINING SETUP
@@ -470,8 +486,9 @@ class GenericModel(pl.LightningModule):
         train_sampler = None
         batch_size: int = self.hparams.batch_size
 
-        if self.use_ddp:
-            train_sampler = DistributedSampler(dataset)
+        # Not necessary anymore
+        # if self.use_ddp:
+        #     train_sampler = DistributedSampler(dataset)
 
         should_shuffle = train_sampler is None and mode == 'train'
         if shuffle_override is not None:
@@ -480,7 +497,7 @@ class GenericModel(pl.LightningModule):
             dataset=dataset,
             batch_size=batch_size,
             shuffle=should_shuffle,
-            sampler=train_sampler,
+            # sampler=train_sampler,
             num_workers=0,
         )
 

@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 import matplotlib as mpl
 from matplotlib import pyplot as plt
-from pytorch_lightning.core.lightning import LightningModule
+from pytorch_lightning import LightningModule
 import torch
 from torch.utils.data.dataloader import DataLoader
 from tqdm import tqdm

@@ -48,6 +48,7 @@ def main(hparams: Namespace) -> None:
     trainer = Trainer(#default_save_path=os.path.join('checkpoints', hparams.experiment_name),
                       callbacks=[early_stop_callback],
                       logger=logger,
+                      log_every_n_steps=2, # to avoid warning for small datasets
                       #show_progress_bar=True,
                       max_epochs=100000)
 
